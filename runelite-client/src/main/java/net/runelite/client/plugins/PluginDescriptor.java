@@ -60,6 +60,8 @@ public @interface PluginDescriptor {
     String Budbomber = "<html>[<font color='#0077B6'>bb</font>]";
     String ChillX = "<html>[<font color=#05e1f5>C</font>] ";
     String Gage = "<html>[<font color=#00008B>Gage</font>]";
+    String FrostyX = "<html>[<font color=#00ccff>\u2744</font>] ";
+
 
     String name();
 
