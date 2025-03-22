@@ -18,9 +18,11 @@ import net.runelite.client.plugins.microbot.util.gameobject.Rs2GameObject;
 import net.runelite.client.plugins.microbot.util.grounditem.Rs2GroundItem;
 import net.runelite.client.plugins.microbot.util.inventory.Rs2Inventory;
 import net.runelite.client.plugins.microbot.util.inventory.Rs2ItemModel;
+import net.runelite.client.plugins.microbot.util.math.Rs2Random;
 import net.runelite.client.plugins.microbot.util.menu.NewMenuEntry;
 import net.runelite.client.plugins.microbot.util.misc.Rs2Potion;
 import net.runelite.client.plugins.microbot.util.misc.Rs2UiHelper;
+import net.runelite.client.plugins.microbot.util.npc.Rs2NpcModel;
 import net.runelite.client.plugins.microbot.util.security.Login;
 import net.runelite.client.plugins.microbot.util.walker.Rs2Walker;
 import net.runelite.client.plugins.microbot.util.widget.Rs2Widget;
@@ -557,7 +559,7 @@ public class Rs2Player {
     /**
      * Finds and consumes the best available food item from the player's inventory.
      *
-     * <p>If in the Wilderness, prioritizes blighted food items.</p>
+     * <p>If in the Wilderness, prioritizes blighted food items but falls back to regular food if none are available.</p>
      * <p>If the selected food is a "Jug of Wine," the player will drink it instead of eating.</p>
      *
      * @return {@code true} if food was consumed, {@code false} if no food was available.
@@ -568,17 +570,24 @@ public class Rs2Player {
 
         boolean inWilderness = Microbot.getVarbitValue(Varbits.IN_WILDERNESS) == 1;
 
-        Rs2ItemModel foodToUse = foods.stream()
-                .filter(rs2Item -> !rs2Item.isNoted()) // Exclude noted food items
-                .filter(rs2Item -> inWilderness && rs2Item.getName().toLowerCase().contains("blighted")) // Prioritize blighted food in Wilderness
-                .findFirst()
-                .orElse(foods.get(0)); // Default to the first available food item
+        // Separate blighted and non-blighted food
+        List<Rs2ItemModel> blightedFoods = foods.stream()
+                .filter(rs2Item -> !rs2Item.isNoted() && rs2Item.getName().toLowerCase().contains("blighted"))
+                .collect(Collectors.toList());
 
-        if (foodToUse.getName().toLowerCase().contains("jug of wine")) {
-            return Rs2Inventory.interact(foodToUse, "drink");
-        }
+        List<Rs2ItemModel> regularFoods = foods.stream()
+                .filter(rs2Item -> !rs2Item.isNoted() && !rs2Item.getName().toLowerCase().contains("blighted"))
+                .collect(Collectors.toList());
 
-        return Rs2Inventory.interact(foodToUse, "eat");
+        // Select food to use: prefer blighted in Wilderness, otherwise use any available food
+        Rs2ItemModel foodToUse = (inWilderness && !blightedFoods.isEmpty()) ? blightedFoods.get(0)
+                : !regularFoods.isEmpty() ? regularFoods.get(0) : null;
+
+        if (foodToUse == null) return false;
+
+        return foodToUse.getName().toLowerCase().contains("jug of wine")
+                ? Rs2Inventory.interact(foodToUse, "drink")
+                : Rs2Inventory.interact(foodToUse, "eat");
     }
 
     /**
@@ -1000,7 +1009,13 @@ public class Rs2Player {
      * @return The {@link WorldPoint} representing the player's current location.
      */
     public static WorldPoint getWorldLocation() {
-        return getLocalPlayer().getWorldLocation();
+        if (Microbot.getClient().getTopLevelWorldView().getScene().isInstance()) {
+            LocalPoint l = LocalPoint.fromWorld(Microbot.getClient().getTopLevelWorldView(), getLocalPlayer().getWorldLocation());
+            WorldPoint playerInstancedWorldLocation = WorldPoint.fromLocalInstance(Microbot.getClient(), l);
+            return playerInstancedWorldLocation;
+        } else {
+            return getLocalPlayer().getWorldLocation();
+        }
     }
 
     /**
@@ -1056,6 +1071,31 @@ public class Rs2Player {
     public static boolean isInMulti() {
         return Microbot.getVarbitValue(Varbits.MULTICOMBAT_AREA)
                 == VarbitValues.INSIDE_MULTICOMBAT_ZONE.getValue();
+    }
+
+    public static boolean drinkPrayerPotion() {
+        int maxPrayer = getRealSkillLevel(Skill.PRAYER);
+        int maxHerblore = getRealSkillLevel(Skill.HERBLORE);
+        int restoreAmount;
+
+        if (hasPotion("moonlight moth mix")) {
+            restoreAmount = 22;
+        } else if (hasPotion("moonlight potion")) {
+            int prayerRestore = (maxPrayer / 4) + 7;
+            int herbloreRestore = (int) Math.floor((maxHerblore * 3.0 / 10.0)) + 7;
+            restoreAmount = Math.max(prayerRestore, herbloreRestore);
+        } else if (hasPotion("super restore") || hasPotion("blighted super restore") ) {
+            restoreAmount = (maxPrayer / 4) + 8;
+        } else {
+            restoreAmount = (maxPrayer / 4) + 7;
+        }
+
+        int threshold = maxPrayer - restoreAmount;
+        int randomizedThreshold = Rs2Random.randomGaussian(threshold - 5, 3);
+        randomizedThreshold = Math.min(randomizedThreshold, threshold);
+        System.out.println("Threshold: " + randomizedThreshold);
+
+        return drinkPrayerPotionAt(randomizedThreshold);
     }
 
     /**
@@ -1766,5 +1806,35 @@ public class Rs2Player {
         );
 
         return true;
+    }
+
+    /**
+     * Retrieves the actor that the local player is currently interacting with.
+     *
+     * @return The interacting actor as an {@link Actor} object. If the interacting actor is an NPC,
+     *         it returns an {@link Rs2NpcModel} object. If the local player is not interacting with anyone,
+     *         or if the local player is null, it returns null.
+     */
+    public static Actor getInteracting() {
+        if (Microbot.getClient().getLocalPlayer() == null) return null;
+
+        var interactingActor = Microbot.getClient().getLocalPlayer().getInteracting();
+
+        if (interactingActor instanceof net.runelite.api.NPC) {
+            return new Rs2NpcModel((NPC) interactingActor);
+        }
+
+        return interactingActor;
+    }
+    /**
+     * Checks if the player has finished Tutorial Island.
+     *
+     * <p>This method checks the player's progress on Tutorial Island by retrieving the value of Varbit 281.
+     * If the value is greater than or equal to 1000, it indicates that the player has completed Tutorial Island.</p>
+     *
+     * @return {@code true} if the player has finished Tutorial Island, {@code false} otherwise.
+     */
+    public static boolean isInTutorialIsland() {
+        return Microbot.getVarbitPlayerValue(281) >= 1000;
     }
 }

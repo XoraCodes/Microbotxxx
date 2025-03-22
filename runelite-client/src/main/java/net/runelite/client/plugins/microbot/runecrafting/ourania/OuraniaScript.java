@@ -5,6 +5,7 @@ import net.runelite.api.coords.WorldArea;
 import net.runelite.api.coords.WorldPoint;
 import net.runelite.client.plugins.microbot.Microbot;
 import net.runelite.client.plugins.microbot.Script;
+import net.runelite.client.plugins.microbot.breakhandler.BreakHandlerScript;
 import net.runelite.client.plugins.microbot.qualityoflife.scripts.pouch.Pouch;
 import net.runelite.client.plugins.microbot.runecrafting.ourania.enums.OuraniaState;
 import net.runelite.client.plugins.microbot.runecrafting.ourania.enums.Path;
@@ -17,6 +18,7 @@ import net.runelite.client.plugins.microbot.util.inventory.Rs2ItemModel;
 import net.runelite.client.plugins.microbot.util.inventory.RunePouchType;
 import net.runelite.client.plugins.microbot.util.magic.Rs2Magic;
 import net.runelite.client.plugins.microbot.util.magic.Rs2Spells;
+import net.runelite.client.plugins.microbot.util.math.Rs2Random;
 import net.runelite.client.plugins.microbot.util.misc.Rs2Potion;
 import net.runelite.client.plugins.microbot.util.npc.Rs2Npc;
 import net.runelite.client.plugins.microbot.util.npc.Rs2NpcModel;
@@ -26,14 +28,20 @@ import net.runelite.client.plugins.skillcalculator.skills.MagicAction;
 
 import javax.inject.Inject;
 import java.util.Arrays;
+import java.util.Comparator;
+import java.util.List;
 import java.util.concurrent.TimeUnit;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.stream.Stream;
 
 public class OuraniaScript extends Script {
     
     private final WorldArea ouraniaAltarArea = new WorldArea(new WorldPoint(3054, 5574, 0), 12, 12);
+    private final List<Integer> massWorlds = List.of(327, 480);
     private final OuraniaPlugin plugin;
     public static OuraniaState state;
+    private int selectedWorld = 0;
     
     @Inject
     public OuraniaScript(OuraniaPlugin plugin) {
@@ -61,6 +69,18 @@ public class OuraniaScript extends Script {
                     Rs2Inventory.checkPouches();
                     return;
                 }
+                
+                if (plugin.isUseMassWorld() && !isOnMassWorld()) {
+                    if (selectedWorld == 0) 
+                        selectedWorld = massWorlds.get(Rs2Random.between(0, massWorlds.size()));
+                    Microbot.hopToWorld(selectedWorld);
+                    sleepUntil(() -> Microbot.getClient().getGameState() == GameState.LOGGED_IN);
+                    return;
+                }
+                
+                if (selectedWorld != 0) {
+                    selectedWorld = 0;
+                }
 
                 if (hasStateChanged()) {
                     state = updateState();
@@ -86,6 +106,11 @@ public class OuraniaScript extends Script {
                             Rs2Magic.cast(MagicAction.OURANIA_TELEPORT);
                         }
                         sleepUntil(() -> Rs2Player.getWorldLocation().distanceTo(new WorldPoint(2468, 3246, 0)) < 24);
+                        
+                        if (plugin.isBreakHandlerEnabled()) {
+                            BreakHandlerScript.setLockState(false);
+                        }
+                        
                         if (Rs2Inventory.hasDegradedPouch() && Rs2Magic.hasRequiredRunes(Rs2Spells.NPC_CONTACT)) {
                             Rs2Magic.repairPouchesWithLunar();
                             return;
@@ -106,9 +131,13 @@ public class OuraniaScript extends Script {
                             return;
                         }
                         
-                        plugin.calcuateProfit();
+                        if (!plugin.isToggleProfitCalculator()) {
+                            plugin.calcuateProfit();
+                        }
                         
-                        if (plugin.isUseDepositAll()) {
+                        boolean hasRunes = Rs2Inventory.items().stream().anyMatch(item -> item.getName().toLowerCase().contains("rune") && !item.getName().toLowerCase().contains("rune pouch"));
+                        
+                        if (plugin.isUseDepositAll() && hasRunes) {
                             Rs2Bank.depositAll();
                         } else {
                             // Get all RunePouchType IDs
@@ -139,7 +168,7 @@ public class OuraniaScript extends Script {
                                 Rs2ItemModel energyRestoreItem = Rs2Bank.bankItems().stream()
                                         .filter(rs2Item -> Rs2Potion.getRestoreEnergyPotionsVariants().stream()
                                                 .anyMatch(variant -> rs2Item.getName().toLowerCase().contains(variant.toLowerCase())))
-                                        .findFirst()
+                                        .min(Comparator.comparingInt(rs2Item -> getDoseFromName(rs2Item.getName())))
                                         .orElse(null);
 
                                 if (energyRestoreItem == null) {
@@ -152,7 +181,7 @@ public class OuraniaScript extends Script {
                             } else if (hasStaminaPotion) {
                                 Rs2ItemModel staminaPotionItem = Rs2Bank.bankItems().stream()
                                         .filter(rs2Item -> rs2Item.getName().toLowerCase().contains(Rs2Potion.getStaminaPotion().toLowerCase()))
-                                        .findFirst()
+                                        .min(Comparator.comparingInt(rs2Item -> getDoseFromName(rs2Item.getName())))
                                         .orElse(null);
 
                                 if (staminaPotionItem == null) {
@@ -212,6 +241,10 @@ public class OuraniaScript extends Script {
                         sleepUntil(() -> !Rs2Bank.isOpen());
                         break;
                     case RUNNING_TO_ALTAR:
+                        if (plugin.isBreakHandlerEnabled()) {
+                            BreakHandlerScript.setLockState(true);
+                        }
+                        
                         Rs2Walker.walkTo(plugin.getPath().getWorldPoint());
                         if (plugin.getPath().equals(Path.LONG)) {
                             Rs2GameObject.interact(ObjectID.CRACK_29626, "squeeze-through");
@@ -272,20 +305,37 @@ public class OuraniaScript extends Script {
     }
     
     private boolean isNearEniola() {
-        NPC eniola = Rs2Npc.getNpc(NpcID.ENIOLA);
+        Rs2NpcModel eniola = Rs2Npc.getNpc(NpcID.ENIOLA);
         if (eniola == null) return false;
         return Rs2Player.getWorldLocation().distanceTo2D(eniola.getWorldLocation()) < 12;
     }
 
     private void withdrawAndDrink(String potionItemName) {
         String simplifiedPotionName = potionItemName.replaceAll("\\s*\\(\\d+\\)", "").trim();
-        Rs2Bank.withdrawOne(simplifiedPotionName);
+        Rs2Bank.withdrawOne(potionItemName);
         Rs2Inventory.waitForInventoryChanges(1800);
-        Rs2Inventory.interact(simplifiedPotionName, "drink");
+        Rs2Inventory.interact(potionItemName, "drink");
         Rs2Inventory.waitForInventoryChanges(1800);
         if (Rs2Inventory.hasItem(simplifiedPotionName)) {
             Rs2Bank.depositOne(simplifiedPotionName);
             Rs2Inventory.waitForInventoryChanges(1800);
         }
+        if (Rs2Inventory.hasItem(ItemID.VIAL)) {
+            Rs2Bank.depositOne(ItemID.VIAL);
+            Rs2Inventory.waitForInventoryChanges(1800);
+        }
+    }
+    
+    private boolean isOnMassWorld() {
+        return massWorlds.contains(Rs2Player.getWorld());
+    }
+
+    private int getDoseFromName(String potionItemName) {
+        Pattern pattern = Pattern.compile("\\((\\d+)\\)$");
+        Matcher matcher = pattern.matcher(potionItemName);
+        if (matcher.find()) {
+            return Integer.parseInt(matcher.group(1));
+        }
+        return 0;
     }
 }
